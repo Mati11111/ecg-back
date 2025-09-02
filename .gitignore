@@ -6,5 +6,6 @@ dev
 /data/ecg_data.db-wal
 /data/ecg_data.db-shm
 /data/ecg_data.dbnull
+/data/.env
 predicted_data.csv
 .env
