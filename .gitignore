@@ -7,3 +7,4 @@ dev
 /data/ecg_data.db-shm
 /data/ecg_data.dbnull
 predicted_data.csv
+.env
