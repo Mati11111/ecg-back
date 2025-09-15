@@ -1,3 +1,4 @@
+from fastapi.middleware.cors import CORSMiddleware
 import threading
 import time
 from datetime import datetime
@@ -11,6 +12,7 @@ import math
 
 from fastapi import FastAPI, WebSocket, Query
 from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi import Body
 import uvicorn
 
 import serial
@@ -27,7 +29,8 @@ BAUDRATE      = 115200    # Debe coincidir con Serial.begin(...) del Arduino
 SER_TIMEOUT   = 1.0       # Timeout de lectura en segundos
 RETRY_SECS    = 1.0       # Reintento de conexión cada 1s
 
-FS            = 853       # Frecuencia de muestreo estimada (informativa)
+#FS            = 853       # Frecuencia de muestreo estimada (informativa)
+FS       = 125
 
 # Detector de BPM sencillo (umbral + refractario)
 UMBRAL       = 400
@@ -36,15 +39,27 @@ RR_MIN       = 0.300
 RR_MAX       = 2.000
 
 # Señal de prueba (senoide)
-_test_cfg = {
-    "enabled": False,   # Si True, reemplaza val por senoide
-    "freq": 1.0,        # Hz
-    "amp": 800,         # amplitud en cuentas (mantener << 0x7FFFFF)
-    "offset": 0,        # offset DC en cuentas
+#_test_cfg = {
+#    "enabled": False,   # Si True, reemplaza val por senoide
+#    "freq": 1.0,        # Hz
+#    "amp": 800,         # amplitud en cuentas (mantener << 0x7FFFFF)
+#    "offset": 0,        # offset DC en cuentas
+#}
+#_test_state = {
+#    "phase": 0.0,
+#    "last_t": None,     # perf_counter del último sample
+#}
+
+# Senal ed prueba 2
+_test_cfg_2 = {
+    "enabled":"False",
+    "freq": 1.0,    # Frecuencia de la señal en Hz
+    "amp": 1.0,     # Amplitud máxima = 1
+    "offset": 0.0,  # Offset 0 para -1 a 1
 }
-_test_state = {
-    "phase": 0.0,
-    "last_t": None,     # perf_counter del último sample
+_test_state_2 = {
+    "last_t": None,
+    "phase": 0.0
 }
 
 # ---------------------- Estado ----------------------
@@ -72,6 +87,9 @@ HDR = b'\xAA\x55'
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"
 DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+
+
 
 # ---------------------- DB ----------------------
 
@@ -210,6 +228,33 @@ def detectar_bpm_sencillo(valor_actual: int, ts_str: str):
     return bpm_out
 
 # ---------------------- Señal de prueba ----------------------
+
+
+def gen_test_sample_normalized_2():
+    now = time.perf_counter()
+    dt = 1.0 / FS
+
+    last_t = _test_state_2["last_t"]
+    if last_t is None:
+        target_t = now
+    else:
+        target_t = last_t + dt
+        if now < target_t:
+            time.sleep(target_t - now)
+
+    _test_state_2["last_t"] = target_t
+
+    # Avanza fase y genera senoide normalizada
+    phase = _test_state_2["phase"]
+    phase += 2.0 * math.pi * _test_cfg_2["freq"] / FS
+    if phase > 2.0 * math.pi:
+        phase -= 2.0 * math.pi
+    _test_state_2["phase"] = phase
+
+    val = _test_cfg_2["offset"] + _test_cfg_2["amp"] * math.sin(phase)
+
+    return val
+
 
 def _gen_test_sample():
     """
@@ -354,9 +399,10 @@ def leer_desde_serial():
     last_seen_switch = globals().get("DB_SWITCH_COUNTER", 0)
     while not _stop_event.is_set():
         # Modo test: genera senoide y procesa
-        if _test_cfg["enabled"]:
+        if _test_cfg_2["enabled"]:
             try:
-                val = _gen_test_sample()
+# using  normalized sample
+                val = gen_test_sample_normalized_2()
                 _process_value(val, cursor)
             except Exception as e:
                 print(f"Error generando señal de prueba: {e}")
@@ -488,6 +534,23 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 
+# Permitir CORS
+origins = [
+    "http://localhost:3000",  # tu frontend local
+    "http://127.0.0.1:3000",  # alternativa 
+    "https://qm1n4mn1-4321.brs.devtunnels.ms",
+    "*",                       # o todos los orígenes (solo para pruebas)
+]
+
+# Configurar CORS
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],          # <- permite todos los orígenes; para producción usa tu frontend específico
+    allow_credentials=True,
+    allow_methods=["*"],          # GET, POST, etc.
+    allow_headers=["*"],          # Headers permitidos
+)
+
 @app.get("/health")
 def health():
     return {
@@ -502,7 +565,7 @@ def health():
         "umbral": UMBRAL,
         "refract_sec": REFRACT_SEC,
         "ws_clients": len(ws_clients),
-        "test_signal": _test_cfg
+        "test_signal": _test_cfg_2
     }
 
 @app.get("/ecg")
@@ -688,6 +751,45 @@ def obtener_ecg_predicciones():
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
 
+@app.get("/sendPrediction")
+def send_prediction():
+    file_path = "predicted_data.csv"
+    if not os.path.exists(file_path):
+        return JSONResponse({"error": "Archivo no encontrado"}, status_code=404)
+
+    try:
+        data = []
+        with open(file_path, newline='', encoding='utf-8') as csvfile:
+            reader = csv.DictReader(csvfile)
+            for row in reader:
+                # Convertir valores a números si es posible
+                row_converted = {
+                    k: (float(v) if v.replace('.', '', 1).isdigit() else v)
+                    for k, v in row.items()
+                }
+                data.append(row_converted)
+
+        return {"ok": True, "predictions": data}
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@app.post("/doPrediction")
+def do_prediction(payload: dict = Body(default={})):
+    global predictionStatus
+    try:
+        predictionStatus = {
+            "ok": True,
+            "message": "Prediction sended"
+        }
+        return predictionStatus
+    except Exception as e:
+        predictionStatus = {"ok": False, "error": str(e)}
+        return predictionStatus
+
+@app.get("/predictionStatus")
+def getPredictionStatus():
+    return {"status": predictionStatus}
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
@@ -698,6 +800,13 @@ async def websocket_endpoint(websocket: WebSocket):
             await websocket.receive_text()
     except Exception:
         ws_clients.discard(websocket)
+
+
+@app.post("/resetPredictionStatus")
+def reset_prediction_status():
+    global predictionStatus
+    predictionStatus = {"ok": False, "message": "idle"}
+    return {"ok": True, "message": "PredictionStatus reset"}
 
 # ---------------------- Main ----------------------
 

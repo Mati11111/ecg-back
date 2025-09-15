@@ -17,7 +17,7 @@ cd ~/Downloads/ecg-front
 
 echo "Asignando credenciales..."
 eval "$(ssh-agent -s)"
-ssh-add ~/.ssh/id_rsa_ecg
+ssh-add ~/.ssh/id_ed25519_ecg_backend
 
 echo "Descargando cambios..."
 git pull
